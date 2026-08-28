@@ -11,6 +11,9 @@ xcuserdata/
 # Local build artifacts
 outputs/*.app/
 outputs/*.dmg
+outputs/*.zip
+outputs/*.sha256
+outputs/*.bundle
 
 # Working screenshots, recordings, rollback copies and smoke binaries
 work/
@@ -27,4 +30,3 @@ CodexMeterRuntimeData/
 *.mobileprovision
 *.pem
 *.key
-
