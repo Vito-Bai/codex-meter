@@ -1,0 +1,30 @@
+# macOS
+.DS_Store
+
+# Swift Package Manager / Xcode
+.build/
+.swiftpm/
+DerivedData/
+*.xcuserstate
+xcuserdata/
+
+# Local build artifacts
+outputs/*.app/
+outputs/*.dmg
+
+# Working screenshots, recordings, rollback copies and smoke binaries
+work/
+
+# Local runtime state must never enter source control
+CodexMeterRuntimeData/
+*.log
+
+# Signing material and environment secrets
+.env
+.env.*
+*.p12
+*.cer
+*.mobileprovision
+*.pem
+*.key
+
