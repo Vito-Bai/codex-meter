@@ -15,6 +15,7 @@ struct SettingsView: View {
             .padding(.top, 8)
         }
         .foregroundStyle(MeterTheme.primaryText)
+        .onAppear { store.refreshLaunchAtLoginStatus() }
     }
 
     private var experienceTab: some View {
@@ -24,12 +25,44 @@ struct SettingsView: View {
 
                 GlassCard {
                     VStack(alignment: .leading, spacing: 14) {
+                        SectionEyebrow(text: "启动")
+                        settingToggle(
+                            "登录时自动启动",
+                            detail: "登录 Mac 后在菜单栏自动运行 Codex Meter。",
+                            isOn: Binding(
+                                get: { store.launchAtLoginEnabled },
+                                set: { store.setLaunchAtLogin($0) }
+                            )
+                        )
+                        if let message = store.launchAtLoginMessage {
+                            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                                Text(message)
+                                    .font(.system(size: 9, design: .rounded))
+                                    .foregroundStyle(MeterTheme.orange)
+                                Spacer()
+                                Button("打开登录项设置") { store.openLoginItemsSettings() }
+                                    .buttonStyle(.link)
+                                    .font(.system(size: 9, weight: .semibold, design: .rounded))
+                            }
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+
+                GlassCard {
+                    VStack(alignment: .leading, spacing: 14) {
                         SectionEyebrow(text: "逐轮反馈")
                         settingToggle("每轮结束后显示 Token", detail: "在菜单栏短暂提示刚完成一轮的处理量。", isOn: $store.menuFeedbackEnabled)
                         Divider().overlay(MeterTheme.line)
                         VStack(alignment: .leading, spacing: 8) {
                             HStack {
-                                Text("显示时长").font(.system(size: 12, weight: .medium, design: .rounded))
+                                VStack(alignment: .leading, spacing: 3) {
+                                    Text("显示时长")
+                                        .font(.system(size: 12, weight: .medium, design: .rounded))
+                                    Text("完成一轮后，菜单栏临时显示本轮 Token 数；这里控制它停留多久。")
+                                        .font(.system(size: 9, design: .rounded))
+                                        .foregroundStyle(MeterTheme.secondaryText)
+                                }
                                 Spacer()
                                 Text("\(Int(store.menuFeedbackSeconds)) 秒")
                                     .font(.system(size: 11, weight: .semibold, design: .rounded))
@@ -41,6 +74,7 @@ struct SettingsView: View {
                         Divider().overlay(MeterTheme.line)
                         settingToggle("保存逐轮 Token 历史", detail: "在本机保存 Token、模型、时长等用量元数据。", isOn: $store.turnHistoryEnabled)
                     }
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
 
                 GlassCard {
@@ -51,6 +85,32 @@ struct SettingsView: View {
                                 if enabled { store.requestNotificationPermission() }
                             }
                     }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+
+                GlassCard {
+                    VStack(alignment: .leading, spacing: 13) {
+                        SectionEyebrow(text: "关于")
+                        HStack {
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text("Codex Meter")
+                                    .font(.system(size: 12, weight: .medium, design: .rounded))
+                                Text("从欢迎页模拟新用户第一次打开软件。")
+                                    .font(.system(size: 9, design: .rounded))
+                                    .foregroundStyle(MeterTheme.secondaryText)
+                            }
+                            Spacer()
+                            Button("使用引导") {
+                                NotificationCenter.default.post(name: .simulateCodexMeterFirstLaunch, object: nil)
+                            }
+                            .buttonStyle(GlassActionButtonStyle())
+                            Button("支持开发") {
+                                NotificationCenter.default.post(name: .showCodexMeterSupport, object: nil)
+                            }
+                            .buttonStyle(GlassActionButtonStyle())
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
             }
             .padding(18)
@@ -77,6 +137,7 @@ struct SettingsView: View {
                         privacyRow("鉴权信息", "不托管", "key")
                         privacyRow("逐轮元数据", store.turnHistoryEnabled ? "本地保存" : "不保存", "externaldrive")
                     }
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
 
                 GlassCard {
@@ -95,6 +156,7 @@ struct SettingsView: View {
                         Button("立即刷新") { Task { await store.refreshAll() } }
                             .buttonStyle(GlassActionButtonStyle(prominent: true))
                     }
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
             }
             .padding(18)
@@ -114,14 +176,20 @@ struct SettingsView: View {
     }
 
     private func settingToggle(_ title: String, detail: String, isOn: Binding<Bool>) -> some View {
-        Toggle(isOn: isOn) {
+        HStack(alignment: .center, spacing: 18) {
             VStack(alignment: .leading, spacing: 3) {
                 Text(title).font(.system(size: 12, weight: .medium, design: .rounded))
                 Text(detail).font(.system(size: 9, design: .rounded)).foregroundStyle(MeterTheme.secondaryText)
             }
+            Spacer(minLength: 12)
+            Toggle("", isOn: isOn)
+                .labelsHidden()
+                .toggleStyle(.switch)
+                .controlSize(.small)
+                .tint(MeterTheme.mint)
+                .frame(width: 42, alignment: .trailing)
         }
-        .toggleStyle(.switch)
-        .tint(MeterTheme.mint)
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private func privacyRow(_ title: String, _ value: String, _ icon: String) -> some View {

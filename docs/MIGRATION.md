@@ -2,7 +2,7 @@
 
 ## 推荐方式
 
-使用 GitHub 私有仓库同步源码，使用离线迁移包保底。GitHub 不承载个人额度快照、Codex 会话日志或登录凭证。
+使用 GitHub 仓库同步源码，使用离线迁移包保底。GitHub 不承载个人额度快照、Codex 会话日志或登录凭证。
 
 ## 旧电脑
 
@@ -18,7 +18,7 @@
 
 1. 安装 Xcode Command Line Tools：`xcode-select --install`。
 2. 安装并登录 ChatGPT/Codex。
-3. 克隆私有仓库或解压离线迁移包。
+3. 克隆 GitHub 仓库或解压离线迁移包。
 4. 在项目根目录执行 `swift build`。
 5. 按 `HANDOFF.md` 运行两个 smoke test。
 6. 执行 `./scripts/package_app.sh` 生成本机应用。
@@ -32,4 +32,3 @@
 - 完成一轮 Codex 对话后，最近一轮标题与 Token 正常更新。
 - 日/周/月趋势可以切换，图表可以悬停定位。
 - 快速纵向滚动没有横向晃动或边缘跳动。
-

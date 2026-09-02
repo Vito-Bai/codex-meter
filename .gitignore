@@ -17,6 +17,7 @@ outputs/*.bundle
 
 # Working screenshots, recordings, rollback copies and smoke binaries
 work/
+tmp/
 
 # Local runtime state must never enter source control
 CodexMeterRuntimeData/

@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import ServiceManagement
 import UserNotifications
 
 @MainActor
@@ -7,25 +8,37 @@ final class UsageStore: ObservableObject {
     @Published private(set) var quota: AccountQuota?
     @Published private(set) var accountUsage: AccountUsageSummary?
     @Published private(set) var dailyUsage: [DailyUsage] = []
+    @Published private(set) var workspaceMessages: [WorkspaceMessage] = []
     @Published private(set) var turns: [TurnUsage] = []
     @Published private(set) var accountReconciliation: AccountUsageReconciliation?
     @Published private(set) var connection: ConnectionState = .connecting
     @Published private(set) var isRefreshing = false
     @Published var transientTurn: TurnUsage?
 
-    @Published var menuFeedbackEnabled = true
-    @Published var menuFeedbackSeconds = 8.0
-    @Published var turnHistoryEnabled = true
-    @Published var highUsageNotificationsEnabled = false
+    @Published var menuFeedbackEnabled: Bool {
+        didSet { defaults.set(menuFeedbackEnabled, forKey: PreferenceKey.menuFeedbackEnabled) }
+    }
+    @Published var menuFeedbackSeconds: Double {
+        didSet { defaults.set(menuFeedbackSeconds, forKey: PreferenceKey.menuFeedbackSeconds) }
+    }
+    @Published var turnHistoryEnabled: Bool {
+        didSet { defaults.set(turnHistoryEnabled, forKey: PreferenceKey.turnHistoryEnabled) }
+    }
+    @Published var highUsageNotificationsEnabled: Bool {
+        didSet { defaults.set(highUsageNotificationsEnabled, forKey: PreferenceKey.highUsageNotificationsEnabled) }
+    }
     @Published var promptTitlesEnabled: Bool {
         didSet {
-            UserDefaults.standard.set(promptTitlesEnabled, forKey: "promptTitlesEnabled")
+            defaults.set(promptTitlesEnabled, forKey: PreferenceKey.promptTitlesEnabled)
             Task { @MainActor [weak self] in
                 await self?.refreshTurns(showFeedback: false)
             }
         }
     }
+    @Published private(set) var launchAtLoginEnabled = false
+    @Published private(set) var launchAtLoginMessage: String?
 
+    private let defaults: UserDefaults
     private let client = CodexAppServerClient()
     private let scanner = SessionUsageScanner()
     private let titleReader = CodexThreadTitleReader()
@@ -43,24 +56,97 @@ final class UsageStore: ObservableObject {
     private var quotaObservations: [QuotaObservation] = []
     private var threadTaskTitles: [String: String] = [:]
     private var titlesFetchedAt: Date?
+    private var readOfficialResetMessageIDs: Set<String>
 
-    init() {
-        if UserDefaults.standard.object(forKey: "promptTitlesEnabled") == nil {
-            promptTitlesEnabled = true
-        } else {
-            promptTitlesEnabled = UserDefaults.standard.bool(forKey: "promptTitlesEnabled")
-        }
+    init(defaults: UserDefaults = .standard) {
+        self.defaults = defaults
+        menuFeedbackEnabled = defaults.value(for: PreferenceKey.menuFeedbackEnabled, default: true)
+        menuFeedbackSeconds = min(max(defaults.value(for: PreferenceKey.menuFeedbackSeconds, default: 8), 3), 15)
+        turnHistoryEnabled = defaults.value(for: PreferenceKey.turnHistoryEnabled, default: true)
+        highUsageNotificationsEnabled = defaults.value(for: PreferenceKey.highUsageNotificationsEnabled, default: false)
+        promptTitlesEnabled = defaults.value(for: PreferenceKey.promptTitlesEnabled, default: true)
+        readOfficialResetMessageIDs = Set(defaults.stringArray(forKey: PreferenceKey.readOfficialResetMessageIDs) ?? [])
+        refreshLaunchAtLoginStatus()
         loadQuotaHistory()
         loadCachedSnapshot()
     }
 
-    var primaryWindow: QuotaWindow? { quota?.primary }
-    var remainingPercent: Int { primaryWindow?.remainingPercent ?? 0 }
-    var quotaColorAvailable: Bool { primaryWindow != nil }
-    var recentTurns: [TurnUsage] { Array(turns.prefix(10)) }
+    func setLaunchAtLogin(_ enabled: Bool) {
+        launchAtLoginMessage = nil
+        do {
+            if enabled {
+                try SMAppService.mainApp.register()
+            } else {
+                try SMAppService.mainApp.unregister()
+            }
+        } catch {
+            launchAtLoginMessage = "无法更新登录项：\(error.localizedDescription)"
+        }
+        refreshLaunchAtLoginStatus()
+    }
 
-    var quotaPace: QuotaPace {
-        guard let window = primaryWindow,
+    func openLoginItemsSettings() {
+        SMAppService.openSystemSettingsLoginItems()
+    }
+
+    func refreshLaunchAtLoginStatus() {
+        switch SMAppService.mainApp.status {
+        case .enabled:
+            launchAtLoginEnabled = true
+        case .requiresApproval:
+            launchAtLoginEnabled = false
+            if launchAtLoginMessage == nil {
+                launchAtLoginMessage = "需要在“系统设置 → 登录项”中允许 Codex Meter。"
+            }
+        case .notRegistered, .notFound:
+            launchAtLoginEnabled = false
+        @unknown default:
+            launchAtLoginEnabled = false
+        }
+    }
+
+    var weeklyWindow: QuotaWindow? { quota?.weeklyWindow }
+    var shortWindow: QuotaWindow? { quota?.shortWindow }
+    var preferredWindow: QuotaWindow? { quota?.preferredWindow }
+    var remainingPercent: Int { preferredWindow?.remainingPercent ?? 0 }
+    var quotaColorAvailable: Bool { preferredWindow != nil }
+    var recentTurns: [TurnUsage] { Array(turns.prefix(10)) }
+    var officialResetNotice: WorkspaceMessage? {
+        workspaceMessages
+            .filter(\.isCodexUsageResetNotice)
+            .sorted { ($0.createdAt ?? .distantPast) > ($1.createdAt ?? .distantPast) }
+            .first
+    }
+    var hasUnreadOfficialResetNotice: Bool {
+        guard let notice = officialResetNotice else { return false }
+        return !readOfficialResetMessageIDs.contains(notice.messageID)
+    }
+
+    func markOfficialResetNoticeRead() {
+        guard let notice = officialResetNotice,
+              readOfficialResetMessageIDs.insert(notice.messageID).inserted
+        else { return }
+        defaults.set(Array(readOfficialResetMessageIDs).sorted(), forKey: PreferenceKey.readOfficialResetMessageIDs)
+        objectWillChange.send()
+    }
+
+    func isOfficialResetConfirmed(_ notice: WorkspaceMessage) -> Bool {
+        guard let resetAt = notice.announcedResetAt, resetAt <= Date() else { return false }
+        let nearby = quotaObservations
+            .filter { abs($0.fetchedAt.timeIntervalSince(resetAt)) <= 24 * 60 * 60 }
+            .sorted { $0.fetchedAt < $1.fetchedAt }
+        guard let before = nearby.last(where: { $0.fetchedAt < resetAt }),
+              let after = nearby.first(where: { $0.fetchedAt >= resetAt })
+        else { return false }
+        let usageRestored = after.usedPercent + 2 < before.usedPercent
+        let resetWindowChanged = !sameReset(before.resetsAt, after.resetsAt)
+        return usageRestored || resetWindowChanged
+    }
+
+    var weeklyQuotaPace: QuotaPace { quotaPace(for: weeklyWindow) }
+
+    private func quotaPace(for window: QuotaWindow?) -> QuotaPace {
+        guard let window,
               let reset = window.resetsAt,
               let durationMinutes = window.windowDurationMinutes
         else { return .unavailable }
@@ -146,15 +232,28 @@ final class UsageStore: ObservableObject {
             quota = snapshot.quota
             if let usage = snapshot.usage { accountUsage = usage }
             if let usage = snapshot.dailyUsage { dailyUsage = usage }
-            if let primary = snapshot.quota.primary {
+            if let messages = snapshot.workspaceMessages {
+                let existing = Dictionary(uniqueKeysWithValues: workspaceMessages.map { ($0.messageID, $0) })
+                workspaceMessages = messages
+                    .filter(\.isActive)
+                    .map { $0.preservingAnnouncedResetAt(from: existing[$0.messageID]) }
+            }
+            if let window = snapshot.quota.weeklyWindow ?? snapshot.quota.preferredWindow {
                 let observation = QuotaObservation(
                     fetchedAt: snapshot.fetchedAt,
-                    usedPercent: primary.usedPercent,
-                    resetsAt: primary.resetsAt,
-                    windowDurationMinutes: primary.windowDurationMinutes
+                    usedPercent: window.usedPercent,
+                    resetsAt: window.resetsAt,
+                    windowDurationMinutes: window.windowDurationMinutes
                 )
-                lastQuotaObservation = observation
                 recordQuotaObservation(observation)
+            }
+            if let weekly = snapshot.quota.weeklyWindow ?? snapshot.quota.preferredWindow {
+                lastQuotaObservation = QuotaObservation(
+                    fetchedAt: snapshot.fetchedAt,
+                    usedPercent: weekly.usedPercent,
+                    resetsAt: weekly.resetsAt,
+                    windowDurationMinutes: weekly.windowDurationMinutes
+                )
             }
             connection = .live(snapshot.fetchedAt)
             accountRetryAttempt = 0
@@ -288,7 +387,7 @@ final class UsageStore: ObservableObject {
             guard windowRaw > 0, windowLocalCredits > 0 else { return nil }
             numerator = Double(tokens) * windowLocalCredits / Double(windowRaw)
         }
-        return makeEstimatedImpact(primaryUsedPercent: interval.usedPercent, numerator: numerator, denominator: denominator)
+        return makeEstimatedImpact(windowUsedPercent: interval.usedPercent, numerator: numerator, denominator: denominator)
     }
 
     func openUsageDashboard() {
@@ -354,7 +453,7 @@ final class UsageStore: ObservableObject {
         guard let interval = currentWindow(containing: turn.completedAt) else { return nil }
         let turnCredits = QuotaCreditWeighting.credits(for: turn.tokens, model: turn.model)
         guard turnCredits > 0, let denominator = weightedWindowCredits(in: interval), denominator > 0 else { return nil }
-        return makeEstimatedImpact(primaryUsedPercent: interval.usedPercent, numerator: turnCredits, denominator: denominator)
+        return makeEstimatedImpact(windowUsedPercent: interval.usedPercent, numerator: turnCredits, denominator: denominator)
     }
 
     private struct ActiveQuotaInterval {
@@ -369,13 +468,13 @@ final class UsageStore: ObservableObject {
     }
 
     private func activeQuotaInterval() -> ActiveQuotaInterval? {
-        guard let primary = primaryWindow,
-              primary.usedPercent > 0,
-              let reset = primary.resetsAt,
-              let duration = primary.windowDurationMinutes
+        guard let weekly = weeklyWindow,
+              weekly.usedPercent > 0,
+              let reset = weekly.resetsAt,
+              let duration = weekly.windowDurationMinutes
         else { return nil }
         let start = reset.addingTimeInterval(-Double(duration) * 60)
-        return ActiveQuotaInterval(start: start, end: reset, usedPercent: primary.usedPercent)
+        return ActiveQuotaInterval(start: start, end: reset, usedPercent: weekly.usedPercent)
     }
 
     private func weightedWindowCredits(in interval: ActiveQuotaInterval) -> Double? {
@@ -401,8 +500,8 @@ final class UsageStore: ObservableObject {
         )
     }
 
-    private func makeEstimatedImpact(primaryUsedPercent: Int, numerator: Double, denominator: Double) -> TurnQuotaImpact {
-        let value = min(Double(primaryUsedPercent), Double(primaryUsedPercent) * numerator / denominator)
+    private func makeEstimatedImpact(windowUsedPercent: Int, numerator: Double, denominator: Double) -> TurnQuotaImpact {
+        let value = min(Double(windowUsedPercent), Double(windowUsedPercent) * numerator / denominator)
         return TurnQuotaImpact(
             percent: value,
             isBelowResolution: value < 0.1,
@@ -453,7 +552,10 @@ final class UsageStore: ObservableObject {
     private func recordQuotaObservation(_ observation: QuotaObservation) {
         // Quota refreshes every five minutes. Keep changed values, but only one
         // unchanged heartbeat per fifteen minutes to avoid needless disk writes.
-        if let last = quotaObservations.last,
+        if let last = quotaObservations.last(where: {
+            sameReset($0.resetsAt, observation.resetsAt)
+                && $0.windowDurationMinutes == observation.windowDurationMinutes
+        }),
            sameReset(last.resetsAt, observation.resetsAt),
            last.usedPercent == observation.usedPercent,
            observation.fetchedAt.timeIntervalSince(last.fetchedAt) < 15 * 60 {
@@ -471,7 +573,7 @@ final class UsageStore: ObservableObject {
         return Array(observations
             .filter { $0.fetchedAt >= cutoff }
             .sorted { $0.fetchedAt < $1.fetchedAt }
-            .suffix(256))
+            .suffix(512))
     }
 
     private func loadCachedSnapshot() {
@@ -481,15 +583,23 @@ final class UsageStore: ObservableObject {
         quota = snapshot.quota
         accountUsage = snapshot.usage
         dailyUsage = snapshot.dailyUsage ?? []
-        if let primary = snapshot.quota.primary {
+        workspaceMessages = snapshot.workspaceMessages?.filter(\.isActive) ?? []
+        if let window = snapshot.quota.weeklyWindow ?? snapshot.quota.preferredWindow {
             let observation = QuotaObservation(
                 fetchedAt: snapshot.fetchedAt,
-                usedPercent: primary.usedPercent,
-                resetsAt: primary.resetsAt,
-                windowDurationMinutes: primary.windowDurationMinutes
+                usedPercent: window.usedPercent,
+                resetsAt: window.resetsAt,
+                windowDurationMinutes: window.windowDurationMinutes
             )
-            lastQuotaObservation = observation
             recordQuotaObservation(observation)
+        }
+        if let weekly = snapshot.quota.weeklyWindow ?? snapshot.quota.preferredWindow {
+            lastQuotaObservation = QuotaObservation(
+                fetchedAt: snapshot.fetchedAt,
+                usedPercent: weekly.usedPercent,
+                resetsAt: weekly.resetsAt,
+                windowDurationMinutes: weekly.windowDurationMinutes
+            )
         }
         connection = .stale(snapshot.fetchedAt)
     }
@@ -499,6 +609,7 @@ final class UsageStore: ObservableObject {
             quota: snapshot.quota,
             usage: snapshot.usage ?? accountUsage,
             dailyUsage: snapshot.dailyUsage ?? dailyUsage,
+            workspaceMessages: snapshot.workspaceMessages ?? workspaceMessages,
             fetchedAt: snapshot.fetchedAt
         )
         guard let data = try? JSONEncoder().encode(merged) else { return }

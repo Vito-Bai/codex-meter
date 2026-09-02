@@ -72,7 +72,8 @@ struct CodexAppServerClient: Sendable {
             ]],
             ["method": "initialized"],
             ["id": 2, "method": "account/rateLimits/read", "params": NSNull()],
-            ["id": 3, "method": "account/usage/read", "params": NSNull()]
+            ["id": 3, "method": "account/usage/read", "params": NSNull()],
+            ["id": 4, "method": "account/workspaceMessages/read", "params": NSNull()]
         ]
 
         for request in requests {
@@ -86,12 +87,14 @@ struct CodexAppServerClient: Sendable {
         var rateResult: [String: Any]?
         var usageResult: [String: Any]?
         var usageFinished = false
+        var messagesResult: [String: Any]?
+        var messagesFinished = false
         var rateReceivedAt: Date?
         let descriptor = output.fileHandleForReading.fileDescriptor
         let originalFlags = fcntl(descriptor, F_GETFL)
         if originalFlags >= 0 { _ = fcntl(descriptor, F_SETFL, originalFlags | O_NONBLOCK) }
 
-        while Date() < deadline, rateResult == nil || !usageFinished {
+        while Date() < deadline, rateResult == nil || !usageFinished || !messagesFinished {
             if let rateReceivedAt, Date().timeIntervalSince(rateReceivedAt) >= 1.5 { break }
             let hardRemaining = max(0, deadline.timeIntervalSinceNow)
             let graceRemaining = rateReceivedAt.map { max(0, 1.5 - Date().timeIntervalSince($0)) } ?? hardRemaining
@@ -126,6 +129,10 @@ struct CodexAppServerClient: Sendable {
                         usageFinished = true
                         continue
                     }
+                    if Self.int(object["id"]) == 4 {
+                        messagesFinished = true
+                        continue
+                    }
                     terminate(process)
                     throw CodexAppServerError.server(message)
                 }
@@ -137,6 +144,9 @@ struct CodexAppServerClient: Sendable {
                 case 3:
                     usageResult = object["result"] as? [String: Any]
                     usageFinished = true
+                case 4:
+                    messagesResult = object["result"] as? [String: Any]
+                    messagesFinished = true
                 default: break
                 }
             }
@@ -147,14 +157,22 @@ struct CodexAppServerClient: Sendable {
             throw Date() >= deadline ? CodexAppServerError.timedOut : CodexAppServerError.malformedResponse
         }
 
-        return try Self.parse(rateResult: rateResult, usageResult: usageResult)
+        return try Self.parse(
+            rateResult: rateResult,
+            usageResult: usageResult,
+            messagesResult: messagesResult
+        )
     }
 
     private func terminate(_ process: Process) {
         if process.isRunning { process.terminate() }
     }
 
-    static func parse(rateResult: [String: Any], usageResult: [String: Any]?) throws -> AccountSnapshot {
+    static func parse(
+        rateResult: [String: Any],
+        usageResult: [String: Any]?,
+        messagesResult: [String: Any]? = nil
+    ) throws -> AccountSnapshot {
         guard let rate = rateResult["rateLimits"] as? [String: Any] else {
             throw CodexAppServerError.malformedResponse
         }
@@ -200,7 +218,28 @@ struct CodexAppServerClient: Sendable {
             }
         }
 
-        return AccountSnapshot(quota: quota, usage: summary, dailyUsage: daily, fetchedAt: .now)
+        let messages = (messagesResult?["messages"] as? [[String: Any]])?.compactMap { message -> WorkspaceMessage? in
+            guard let messageID = message["messageId"] as? String,
+                  let body = message["messageBody"] as? String,
+                  !body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            else { return nil }
+            return WorkspaceMessage(
+                messageID: messageID,
+                messageType: message["messageType"] as? String,
+                messageBody: body,
+                createdAt: Self.unixDate(message["createdAt"]),
+                archivedAt: Self.unixDate(message["archivedAt"]),
+                announcedResetAt: Self.detectedDate(in: body)
+            )
+        }
+
+        return AccountSnapshot(
+            quota: quota,
+            usage: summary,
+            dailyUsage: daily,
+            workspaceMessages: messages,
+            fetchedAt: .now
+        )
     }
 
     private static func findCodexExecutable() -> String? {
@@ -252,5 +291,19 @@ struct CodexAppServerClient: Sendable {
         if let value = value as? Int { return Int64(value) }
         if let value = value as? NSNumber { return value.int64Value }
         return nil
+    }
+
+    private static func unixDate(_ value: Any?) -> Date? {
+        int64(value).map { Date(timeIntervalSince1970: TimeInterval($0)) }
+    }
+
+    private static func detectedDate(in text: String) -> Date? {
+        guard let detector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.date.rawValue) else {
+            return nil
+        }
+        return detector.firstMatch(
+            in: text,
+            range: NSRange(text.startIndex..., in: text)
+        )?.date
     }
 }

@@ -185,6 +185,44 @@ struct DailyUsage: Identifiable, Codable, Equatable, Sendable {
     let tokens: Int64
 }
 
+struct WorkspaceMessage: Identifiable, Codable, Equatable, Sendable {
+    let messageID: String
+    let messageType: String?
+    let messageBody: String
+    let createdAt: Date?
+    let archivedAt: Date?
+    /// A date explicitly detected in the official message when it was first
+    /// fetched. Persisting it prevents relative wording from being re-parsed
+    /// against a different day after an app restart.
+    let announcedResetAt: Date?
+
+    var id: String { messageID }
+    var isActive: Bool { archivedAt == nil }
+
+    var isCodexUsageResetNotice: Bool {
+        let text = messageBody.lowercased()
+        let mentionsReset = text.contains("reset") || text.contains("重置") || text.contains("刷新")
+        let mentionsUsage = text.contains("codex")
+            || text.contains("usage")
+            || text.contains("rate limit")
+            || text.contains("额度")
+            || text.contains("用量")
+        return isActive && mentionsReset && mentionsUsage
+    }
+
+    func preservingAnnouncedResetAt(from previous: WorkspaceMessage?) -> WorkspaceMessage {
+        guard let previousDate = previous?.announcedResetAt else { return self }
+        return WorkspaceMessage(
+            messageID: messageID,
+            messageType: messageType,
+            messageBody: messageBody,
+            createdAt: createdAt,
+            archivedAt: archivedAt,
+            announcedResetAt: previousDate
+        )
+    }
+}
+
 struct QuotaWindow: Codable, Equatable, Sendable {
     let usedPercent: Int
     let windowDurationMinutes: Int64?
@@ -202,6 +240,29 @@ struct AccountQuota: Codable, Equatable, Sendable {
     let unlimitedCredits: Bool
     let resetCreditCount: Int
     let limitReached: Bool
+
+    var windows: [QuotaWindow] {
+        [primary, secondary].compactMap { $0 }
+    }
+
+    /// Codex currently returns the five-hour window as `primary` and the
+    /// weekly budget as `secondary`. Classify by duration so UI priority does
+    /// not depend on transport ordering.
+    var weeklyWindow: QuotaWindow? {
+        windows
+            .filter { ($0.windowDurationMinutes ?? 0) >= 24 * 60 }
+            .max { ($0.windowDurationMinutes ?? 0) < ($1.windowDurationMinutes ?? 0) }
+    }
+
+    var shortWindow: QuotaWindow? {
+        windows
+            .filter { ($0.windowDurationMinutes ?? .max) < 24 * 60 }
+            .min { ($0.windowDurationMinutes ?? .max) < ($1.windowDurationMinutes ?? .max) }
+    }
+
+    var preferredWindow: QuotaWindow? {
+        weeklyWindow ?? shortWindow ?? primary ?? secondary
+    }
 }
 
 struct AccountUsageSummary: Codable, Equatable, Sendable {
@@ -216,6 +277,9 @@ struct AccountSnapshot: Codable, Sendable {
     let quota: AccountQuota
     let usage: AccountUsageSummary?
     let dailyUsage: [DailyUsage]?
+    /// Optional so snapshots written by builds before workspace-message
+    /// support remain decodable.
+    let workspaceMessages: [WorkspaceMessage]?
     let fetchedAt: Date
 }
 

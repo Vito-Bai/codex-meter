@@ -58,6 +58,7 @@ struct MenuContentView: View {
         .frame(width: 420, height: 760)
         .foregroundStyle(MeterTheme.primaryText)
         .background(MenuWindowTransparencyBridge().frame(width: 0, height: 0))
+        .onAppear { store.markOfficialResetNoticeRead() }
     }
 
     private var menuSections: some View {
@@ -71,6 +72,80 @@ struct MenuContentView: View {
             footer
         }
         .padding(14)
+    }
+
+    private var officialResetNotice: some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: store.officialResetNotice == nil ? "checkmark.shield.fill" : "megaphone.fill")
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(MeterTheme.cyan)
+                .frame(width: 23, height: 23)
+                .background(MeterTheme.cyan.opacity(0.13), in: Circle())
+            VStack(alignment: .leading, spacing: 5) {
+                SectionEyebrow(text: "OpenAI 官方重置动态")
+                if let notice = store.officialResetNotice {
+                    Text(officialResetHeadline(notice))
+                        .font(.system(size: 10.5, weight: .semibold, design: .rounded))
+                        .fixedSize(horizontal: false, vertical: true)
+                    Text(officialResetDetail(notice))
+                        .font(.system(size: 9, weight: .medium, design: .rounded))
+                        .foregroundStyle(MeterTheme.secondaryText)
+                        .fixedSize(horizontal: false, vertical: true)
+                    if let date = notice.createdAt {
+                        Text("官方动态·\(TokenFormat.relativeDate(date))")
+                            .font(.system(size: 8, design: .rounded))
+                            .foregroundStyle(MeterTheme.secondaryText.opacity(0.72))
+                    }
+                } else {
+                    Text("暂无官方统一重置公告")
+                        .font(.system(size: 10, weight: .medium, design: .rounded))
+                        .foregroundStyle(MeterTheme.secondaryText)
+                    Text("每 5 分钟检查一次")
+                        .font(.system(size: 8, design: .rounded))
+                        .foregroundStyle(MeterTheme.secondaryText.opacity(0.72))
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private func officialResetHeadline(_ notice: WorkspaceMessage) -> String {
+        guard let resetAt = notice.announcedResetAt else {
+            return "OpenAI 已宣布将统一重置额度"
+        }
+        if resetAt > Date() {
+            return "官方将于 \(officialResetDateText(resetAt)) 重置额度"
+        }
+        if store.isOfficialResetConfirmed(notice) {
+            return "官方统一重置已完成"
+        }
+        return "官方计划的重置时间已到"
+    }
+
+    private func officialResetDetail(_ notice: WorkspaceMessage) -> String {
+        guard let resetAt = notice.announcedResetAt else {
+            return "官方暂未提供可识别的具体时间"
+        }
+        if resetAt > Date() {
+            return "距离重置还有 \(remainingTimeText(resetAt))·按本地时间显示"
+        }
+        if store.isOfficialResetConfirmed(notice) {
+            return "已检测到额度窗口恢复或变更"
+        }
+        return "正在确认额度是否已经恢复"
+    }
+
+    private func officialResetDateText(_ date: Date) -> String {
+        let calendar = Calendar.current
+        let prefix: String
+        if calendar.isDateInToday(date) {
+            prefix = "今天"
+        } else if calendar.isDateInTomorrow(date) {
+            prefix = "明天"
+        } else {
+            prefix = date.formatted(.dateTime.month().day())
+        }
+        return "\(prefix) \(date.formatted(.dateTime.hour().minute()))"
     }
 
     private var header: some View {
@@ -101,14 +176,9 @@ struct MenuContentView: View {
 
     private var quotaHero: some View {
         GlassCard {
-            VStack(spacing: 15) {
+            VStack(spacing: 16) {
                 HStack {
-                    VStack(alignment: .leading, spacing: 3) {
-                        SectionEyebrow(text: "本周期剩余")
-                        Text(store.primaryWindow.map(windowLabel) ?? "额度窗口待同步")
-                            .font(.system(size: 11, weight: .medium, design: .rounded))
-                            .foregroundStyle(MeterTheme.secondaryText)
-                    }
+                    SectionEyebrow(text: "剩余用量")
                     Spacer()
                     Text(store.quota?.planType?.uppercased() ?? "CODEX")
                         .font(.system(size: 9, weight: .bold, design: .rounded))
@@ -119,30 +189,26 @@ struct MenuContentView: View {
                         .overlay(Capsule().strokeBorder(MeterTheme.line, lineWidth: 0.7))
                 }
 
-                HStack(spacing: 20) {
-                    QuotaRing(remaining: store.remainingPercent, available: store.primaryWindow != nil, size: 108)
+                HStack(spacing: 18) {
+                    DualQuotaRing(
+                        weeklyRemaining: store.weeklyWindow?.remainingPercent,
+                        shortRemaining: store.shortWindow?.remainingPercent,
+                        size: 100
+                    )
                     VStack(alignment: .leading, spacing: 11) {
-                        quotaMetric("已用", store.primaryWindow.map { "\($0.usedPercent)%" } ?? "—")
-                        quotaMetric("重置", store.primaryWindow.flatMap(\.resetsAt).map(resetDateText) ?? "待同步")
-                        quotaMetric("还剩", store.primaryWindow.flatMap(\.resetsAt).map(remainingTimeText) ?? "—")
+                        quotaWindowRow(
+                            "1 周额度",
+                            window: store.weeklyWindow,
+                            color: ringColor(for: store.weeklyWindow, base: MeterTheme.cyan)
+                        )
+                        Divider().overlay(MeterTheme.line)
+                        quotaWindowRow(
+                            "5 小时额度",
+                            window: store.shortWindow,
+                            color: ringColor(for: store.shortWindow, base: MeterTheme.mint)
+                        )
                     }
-                    Spacer(minLength: 0)
-                }
-
-                if let secondary = store.quota?.secondary {
-                    Divider().overlay(MeterTheme.line)
-                    HStack {
-                        Label("完整周期窗口", systemImage: "circle.dashed.inset.filled")
-                            .font(.system(size: 10, weight: .medium, design: .rounded))
-                            .foregroundStyle(MeterTheme.secondaryText)
-                        Spacer()
-                        Text("剩余 \(secondary.remainingPercent)%")
-                            .font(.system(size: 11, weight: .semibold, design: .rounded))
-                            .monospacedDigit()
-                        Text(secondary.resetsAt.map(remainingTimeText) ?? "")
-                            .font(.system(size: 9, design: .rounded))
-                            .foregroundStyle(MeterTheme.secondaryText)
-                    }
+                    .frame(maxWidth: .infinity)
                 }
             }
         }
@@ -152,21 +218,21 @@ struct MenuContentView: View {
         GlassCard {
             HStack(spacing: 13) {
                 ZStack {
-                    Circle().fill(quotaColor.opacity(0.13))
+                    Circle().fill(weeklyPaceColor.opacity(0.13))
                     Image(systemName: "gauge.with.dots.needle.50percent")
                         .font(.system(size: 17, weight: .medium))
-                        .foregroundStyle(quotaColor)
+                        .foregroundStyle(weeklyPaceColor)
                 }
                 .frame(width: 40, height: 40)
                 VStack(alignment: .leading, spacing: 4) {
                     HStack {
-                        SectionEyebrow(text: "使用节奏")
+                        SectionEyebrow(text: "本周额度节奏")
                         Spacer()
-                        Text(paceTitle)
+                        Text(weeklyPaceTitle)
                             .font(.system(size: 11, weight: .semibold, design: .rounded))
-                            .foregroundStyle(quotaColor)
+                            .foregroundStyle(weeklyPaceColor)
                     }
-                    Text(paceDescription)
+                    Text(weeklyPaceDescription)
                         .font(.system(size: 10, weight: .medium, design: .rounded))
                         .foregroundStyle(MeterTheme.secondaryText)
                         .fixedSize(horizontal: false, vertical: true)
@@ -285,12 +351,38 @@ struct MenuContentView: View {
 
     private var otherInfoCard: some View {
         GlassCard {
-            VStack(alignment: .leading, spacing: 0) {
-                HStack(spacing: 24) {
-                    compactMetric("可用额外 Credits", store.quota?.unlimitedCredits == true ? "无限" : (store.quota?.creditBalance ?? "0"))
-                    compactMetric("免费额度重置", "\(store.quota?.resetCreditCount ?? 0) 次")
+            HStack(alignment: .top, spacing: 14) {
+                officialResetNotice
+                    .frame(maxWidth: .infinity, alignment: .leading)
+
+                Divider().overlay(MeterTheme.line).frame(maxHeight: .infinity)
+
+                VStack(alignment: .leading, spacing: 9) {
+                    compactSupportingMetric(
+                        "免费重置",
+                        "\(store.quota?.resetCreditCount ?? 0) 次"
+                    )
+                    Divider().overlay(MeterTheme.line)
+                    compactSupportingMetric(
+                        "额外 Credits",
+                        store.quota?.unlimitedCredits == true ? "无限" : (store.quota?.creditBalance ?? "0")
+                    )
                 }
+                .frame(width: 108, alignment: .leading)
             }
+        }
+    }
+
+    private func compactSupportingMetric(_ label: String, _ value: String) -> some View {
+        HStack(alignment: .firstTextBaseline) {
+            Text(label)
+                .font(.system(size: 8.5, weight: .medium, design: .rounded))
+                .foregroundStyle(MeterTheme.secondaryText)
+            Spacer(minLength: 6)
+            Text(value)
+                .font(.system(size: 11, weight: .semibold, design: .rounded))
+                .foregroundStyle(MeterTheme.primaryText.opacity(0.82))
+                .monospacedDigit()
         }
     }
 
@@ -298,7 +390,10 @@ struct MenuContentView: View {
         HStack(spacing: 8) {
             Button("官方用量") { store.openUsageDashboard() }.buttonStyle(GlassActionButtonStyle())
             Spacer()
-            Button { openSettings() } label: { Image(systemName: "gearshape.fill") }
+            Button {
+                openSettings()
+                NotificationCenter.default.post(name: .bringCodexMeterSettingsToFront, object: nil)
+            } label: { Image(systemName: "gearshape.fill") }
                 .buttonStyle(GlassIconButtonStyle()).help("设置")
             Button { NSApplication.shared.terminate(nil) } label: { Image(systemName: "power") }
                 .buttonStyle(GlassIconButtonStyle()).help("退出")
@@ -325,39 +420,53 @@ struct MenuContentView: View {
         }
     }
 
-    private var paceTitle: String {
-        switch store.quotaPace {
+    private var weeklyPaceTitle: String {
+        switch store.weeklyQuotaPace {
         case .unavailable: return "数据不可用"
-        case .accumulating: return store.remainingPercent < 25 ? "额度紧张" : "分析中"
-        case .stable: return store.remainingPercent < 25 ? "额度紧张" : "节奏平稳"
-        case .sustainable: return store.remainingPercent < 25 ? "额度紧张" : "节奏正常"
-        case .exhausts: return "需要留意"
+        case .accumulating, .stable: return (store.weeklyWindow?.remainingPercent ?? 100) < 25 ? "额度紧张" : "节奏平稳"
+        case .sustainable: return (store.weeklyWindow?.remainingPercent ?? 100) < 25 ? "额度紧张" : "节奏健康"
+        case .exhausts: return "消耗偏快"
         }
     }
 
-    private var paceDescription: String {
+    private var weeklyPaceDescription: String {
         if case .unavailable(let reason) = store.connection {
             return "\(reason)；本地 Token 记录仍可查看。"
         }
-        guard store.primaryWindow != nil else { return "连接 Codex 后，将根据额度快照判断能否撑到重置。" }
+        guard let weekly = store.weeklyWindow else { return "一周额度窗口待同步。" }
         if let reconciliation = store.accountReconciliation,
            Date().timeIntervalSince(reconciliation.capturedAt) < 1_800,
            reconciliation.unattributedPercent >= 0.5 {
             return "账户下降 \(percentText(reconciliation.observedPercent))；本机约 \(percentText(reconciliation.localEstimatedPercent))，其余 \(percentText(reconciliation.unattributedPercent)) 可能来自其它设备。"
         }
-        switch store.quotaPace {
+        switch store.weeklyQuotaPace {
         case .unavailable:
-            return "连接 Codex 后，将根据额度快照判断能否撑到重置。"
-        case let .accumulating(elapsed, required):
-            let elapsedMinutes = max(0, Int(elapsed / 60))
-            let remainingMinutes = max(1, Int(ceil((required - elapsed) / 60)))
-            return "正在积累趋势：已记录 \(elapsedMinutes) 分钟，还需约 \(remainingMinutes) 分钟。"
+            return "连接 Codex 后，将判断本周额度能否撑到重置。"
+        case .accumulating:
+            return "本周剩余 \(weekly.remainingPercent)% · 距重置 \(weekly.resetsAt.map(remainingTimeText) ?? "待同步")；趋势样本仍在积累。"
         case .stable:
-            return "近期额度变化低于 2%，暂不预测耗尽时间。"
+            return "本周剩余 \(weekly.remainingPercent)%；近期额度变化低于 2%，当前消耗平稳。"
         case let .sustainable(projectedRemaining):
-            return "按当前节奏可使用至本次重置，预计届时仍剩约 \(Int(projectedRemaining.rounded()))%。"
+            return "按当前速度可用至周重置，预计届时仍剩约 \(Int(projectedRemaining.rounded()))%。"
         case let .exhausts(date):
-            return "按当前节奏可能在 \(paceDateText(date)) 耗尽，早于本次重置。"
+            return "按当前速度可能在 \(paceDateText(date)) 耗尽，早于周重置。"
+        }
+    }
+
+    private var weeklyPaceColor: Color {
+        paceColor(store.weeklyQuotaPace, remaining: store.weeklyWindow?.remainingPercent, healthy: MeterTheme.cyan)
+    }
+
+    private func paceColor(_ pace: QuotaPace, remaining: Int?, healthy: Color) -> Color {
+        guard let remaining else { return .gray }
+        if remaining < 25 { return MeterTheme.red }
+        switch pace {
+        case .exhausts: return MeterTheme.orange
+        case let .sustainable(projected) where projected < 20: return MeterTheme.yellow
+        default:
+            if remaining < 50 { return MeterTheme.orange }
+            if remaining <= 80 { return MeterTheme.yellow }
+            return healthy
         }
     }
 
@@ -605,21 +714,50 @@ struct MenuContentView: View {
         return formatter
     }()
 
-    private func windowLabel(_ window: QuotaWindow) -> String {
-        guard let minutes = window.windowDurationMinutes else { return "当前额度窗口" }
-        if minutes < 1_440 {
-            let hours = max(1, Int(ceil(Double(minutes) / 60)))
-            return "\(hours) 小时窗口"
+    private func quotaWindowRow(_ label: String, window: QuotaWindow?, color: Color) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 7) {
+                Circle().fill(color).frame(width: 7, height: 7)
+                Text(label)
+                    .font(.system(size: 10, weight: .medium, design: .rounded))
+                    .foregroundStyle(MeterTheme.secondaryText)
+            }
+            HStack(alignment: .center, spacing: 10) {
+                VStack(alignment: .leading, spacing: 4) {
+                    quotaWindowDetail(
+                        "重置",
+                        window?.resetsAt.map(resetDateText) ?? "待同步"
+                    )
+                    quotaWindowDetail(
+                        "还剩",
+                        window?.resetsAt.map(remainingTimeText) ?? "—"
+                    )
+                }
+                Spacer(minLength: 6)
+                Text(window.map { "剩余 \($0.remainingPercent)%" } ?? "待同步")
+                    .font(.system(size: 13, weight: .semibold, design: .rounded))
+                    .monospacedDigit()
+            }
+            .padding(.leading, 14)
         }
-        let days = max(1, Int(minutes / 1_440))
-        return "\(days) 天窗口"
     }
 
-    private func quotaMetric(_ label: String, _ value: String) -> some View {
-        HStack {
-            Text(label).font(.system(size: 9, weight: .medium, design: .rounded)).foregroundStyle(MeterTheme.secondaryText).frame(width: 34, alignment: .leading)
-            Text(value).font(.system(size: 12, weight: .semibold, design: .rounded)).monospacedDigit()
+    private func quotaWindowDetail(_ label: String, _ value: String) -> some View {
+        HStack(spacing: 8) {
+            Text(label)
+                .font(.system(size: 8.5, weight: .medium, design: .rounded))
+                .foregroundStyle(MeterTheme.secondaryText)
+                .frame(width: 26, alignment: .leading)
+            Text(value)
+                .font(.system(size: 10.5, weight: .semibold, design: .rounded))
+                .monospacedDigit()
+                .lineLimit(1)
         }
+    }
+
+    private func ringColor(for window: QuotaWindow?, base: Color) -> Color {
+        guard let window else { return .gray }
+        return window.remainingPercent > 80 ? base : MeterTheme.quotaColor(remaining: window.remainingPercent)
     }
 
     private func compactMetric(_ label: String, _ value: String) -> some View {
@@ -1219,35 +1357,61 @@ private struct MenuTurnDetailView: View {
     }
 }
 
-struct QuotaRing: View {
-    let remaining: Int
-    let available: Bool
+struct DualQuotaRing: View {
+    let weeklyRemaining: Int?
+    let shortRemaining: Int?
     let size: CGFloat
-    @State private var animatedProgress = 0.0
-    var body: some View {
-        let color = MeterTheme.quotaColor(remaining: remaining, available: available)
-        ZStack {
-            VStack(spacing: -1) {
-                Text(available ? "\(remaining)" : "—").font(.system(size: 32, weight: .bold, design: .rounded)).monospacedDigit()
-                Text(available ? "% 剩余" : "离线")
-                    .font(.system(size: 8.5, weight: .semibold, design: .rounded)).tracking(0.8).foregroundStyle(MeterTheme.secondaryText)
-            }
-            .frame(width: size - 26, height: size - 26)
-            .modifier(ClearGlassCircleModifier())
-            .overlay(Circle().stroke(MeterTheme.line.opacity(0.72), lineWidth: 0.7))
+    @State private var animatedWeeklyProgress = 0.0
+    @State private var animatedShortProgress = 0.0
 
-            Circle().stroke(MeterTheme.line.opacity(0.72), lineWidth: 8)
-            Circle().trim(from: 0, to: animatedProgress)
-                .stroke(color, style: StrokeStyle(lineWidth: 8, lineCap: .round))
+    var body: some View {
+        ZStack {
+            Circle()
+                .stroke(windowColor(weeklyRemaining, base: MeterTheme.cyan).opacity(0.15), lineWidth: 15)
+            Circle().trim(from: 0, to: animatedWeeklyProgress)
+                .stroke(
+                    windowColor(weeklyRemaining, base: MeterTheme.cyan),
+                    style: StrokeStyle(lineWidth: 15, lineCap: .round)
+                )
                 .rotationEffect(.degrees(-90))
+                .shadow(color: .black.opacity(0.24), radius: 2.5, x: 1.5, y: 1.5)
+
+            Circle()
+                .stroke(windowColor(shortRemaining, base: MeterTheme.mint).opacity(0.15), lineWidth: 15)
+                .padding(20)
+            Circle().trim(from: 0, to: animatedShortProgress)
+                .stroke(
+                    windowColor(shortRemaining, base: MeterTheme.mint),
+                    style: StrokeStyle(lineWidth: 15, lineCap: .round)
+                )
+                .rotationEffect(.degrees(-90))
+                .padding(20)
+                .shadow(color: .black.opacity(0.24), radius: 2.5, x: 1.5, y: 1.5)
         }
         .frame(width: size, height: size)
         .onAppear { animate() }
-        .onChange(of: remaining) { _, _ in animate() }
-        .accessibilityLabel(available ? "额度剩余百分之 \(remaining)" : "额度不可用")
+        .onChange(of: weeklyRemaining) { _, _ in animate() }
+        .onChange(of: shortRemaining) { _, _ in animate() }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(accessibilityText)
     }
+
     private func animate() {
-        withAnimation(.spring(duration: 0.85, bounce: 0.16)) { animatedProgress = available ? Double(remaining) / 100 : 0 }
+        withAnimation(.spring(duration: 0.85, bounce: 0.16)) {
+            animatedWeeklyProgress = weeklyRemaining.map { Double($0) / 100 } ?? 0
+            animatedShortProgress = shortRemaining.map { Double($0) / 100 } ?? 0
+        }
+    }
+
+    private func windowColor(_ remaining: Int?, base: Color) -> Color {
+        guard let remaining else { return .gray }
+        return remaining > 80 ? base : MeterTheme.quotaColor(remaining: remaining)
+    }
+
+    private var accessibilityText: String {
+        let weekly = weeklyRemaining.map { "本周额度剩余百分之 \($0)" } ?? "本周额度不可用"
+        let short = shortRemaining.map { "五小时额度剩余百分之 \($0)" } ?? "五小时额度不可用"
+        return "\(weekly)，\(short)"
     }
 }
 
